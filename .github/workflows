@@ -1,0 +1,98 @@
+name: Black Duck Scan
+
+on:
+  # Trigger the workflow on push to the main branch, pull requests to the main branch, and manual dispatch
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
+jobs:
+  blackduck-scan:
+    runs-on: internal  # Specify the runner to use for the job
+
+    steps:
+      - name: Checkout orchestrator repo
+        uses: actions/checkout@v2  # Check out the repository to the GitHub runner
+
+      - name: Set up Java
+        uses: actions/setup-java@v2  # Set up the Java environment
+        with:
+          distribution: 'adopt'  # Specify the Java distribution to use
+          java-version: '17'  # Specify the Java version to use
+
+      - name: Set up Black Duck CLI
+        run: |
+          set -x # Enable shell debugging to print each command before execution
+          
+          # Retry logic for downloading the Black Duck detect script using wget
+          for i in {1..5}; do
+            wget -v https://detect.synopsys.com/detect9.sh -O /tmp/detect.sh && break
+            echo "wget failed, retrying in 5 seconds..."
+            sleep 5
+          done
+          # Exit if the script fails to download after multiple attempts
+          if [ ! -f /tmp/detect.sh ]; then
+            echo "Failed to download detect.sh after multiple attempts"
+            exit 1
+          fi
+          chmod +x /tmp/detect.sh  # Make the downloaded script executable
+
+      - name: Clone and scan repositories
+        env:
+          GITHUB_TOKEN: ${{ secrets.READ_GITHUB_ACTIONS_PAT }}  # Use a GitHub token for authentication
+          BLACKDUCK_URL: ""  # Black Duck server URL
+          BLACKDUCK_API_TOKEN: ""  # Black Duck API token
+        run: |
+          # Create a directory for cloning repositories
+          mkdir cds-repos
+          cd cds-repos
+
+          # List of repositories to clone and scan
+          repos=(
+            repo names
+          )
+
+          # Configure Git to use the GitHub token for authentication
+          git config --global http."https://github.com/".extraheader "AUTHORIZATION: Basic $(echo -n "username:${GITHUB_TOKEN}" | base64)"
+
+          echo "current working directory before clone is: `pwd`"
+          
+          # Clone each repository and run Black Duck scan
+          for repo in "${repos[@]}"; do
+              # Extract the repository name from the URL
+              repo_name=$(basename -s .git "$repo")
+
+              # Clone the repository using the token
+              git clone "$repo"
+              if [ $? -ne 0 ]; then
+                echo "Failed to clone repository: $repo"
+                exit 1
+              fi
+              echo "current working directory after clone is: `pwd`"
+          done
+          
+          # Change to the current directory (where the repositories are cloned)
+          cd `pwd`
+          echo "scanning directory after clone is: `pwd`"
+          
+          # Run the Black Duck scan with specified parameters
+          /tmp/detect.sh \
+            --blackduck.url="$BLACKDUCK_URL"  \
+            --blackduck.api.token="$BLACKDUCK_API_TOKEN" \
+            --blackduck.trust.cert=true \
+            --detect.project.name=test\
+            --detect.project.version.name=1.1.0 \
+            --logging.level.com.synopsys.integration=DEBUG \
+            --detect.detector.search.depth=400 \
+            --detect.detector.search.continue=true \
+            --detect.maven.included.scopes=compile,runtime \
+            --detect.gradle.included.configurations=compile,runtime \
+            --detect.npm.include.dev.dependencies=true \
+            --detect.accuracy.required=NONE
+
+      - name: Clean up
+        run: |
+          # Clean up the cloned repositories to maintain a clean environment
+          rm -rf repos
