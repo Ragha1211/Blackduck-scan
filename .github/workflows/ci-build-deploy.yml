@@ -1,0 +1,192 @@
+name: CI build and deploy on QA env
+
+on:
+   
+  schedule:
+    - cron: '30 23 * * *' # Runs every night at 11:30 PM UTC
+
+env:
+  ARTIFACTORY_USERNAME: ${{ secrets.READ_WRITE_GITHUB_PACKAGES_USER }}
+  ARTIFACTORY_PASSWORD: ${{ secrets.READ_WRITE_GITHUB_PACKAGES_PAT }}
+  ARTIFACTORY_URL: https://maven.pkg.github.com/
+  BASE_IMAGE: ghcr.io/
+  DOCKER_REGISTRY_PREFIX: ghcr.io
+  DOCKER_TAG: latest
+  MAVEN_OPTS: "-Dhttps.protocols=TLSv1.2 -Dmaven.repo.local=.m2/repository -Dorg.slf4j.simpleLogger.log.org.apache.maven.cli.transfer.Slf4jMavenTransferListener=WARN -Dorg.slf4j.simpleLogger.showDateTime=true -Djava.awt.headless=true"
+  MAVEN_CLI_OPTS: "--settings settings.xml --batch-mode --errors --fail-at-end --show-version -DinstallAtEnd=true -DdeployAtEnd=false"
+  MAVEN_PROFILE: snapshots
+  REPO_WORKFLOW_FILE: service-deployment.yml
+
+jobs:
+  maven-build-deploy:
+    runs-on:
+      - internal
+    container:
+      credentials:
+         username: ${{ secrets.READ_WRITE_GITHUB_PACKAGES_USER }}
+         password: ${{ secrets.READ_WRITE_GITHUB_PACKAGES_PAT }}
+      image: ghcr.io
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+      - name: Cache Maven packages
+        uses: actions/cache@v2
+        with:
+          path: .m2
+          key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
+          restore-keys: ${{ runner.os }}-m2
+      - name: Maven build
+        run: |
+          mvn $MAVEN_CLI_OPTS clean install -DskipTests=true
+      - name: Maven test
+        run: |
+          mvn $MAVEN_CLI_OPTS verify
+      - name: Deploy to Maven repository
+        if: github.ref == 'refs/heads/main'
+        run: |
+          mvn $MAVEN_CLI_OPTS  deploy
+
+  Docker-build: 
+    needs: maven-build-deploy
+    runs-on:
+      - internal
+    container:
+      credentials:
+          username: ${{ secrets.READ_WRITE_GITHUB_PACKAGES_USER }}
+          password: ${{ secrets.READ_WRITE_GITHUB_PACKAGES_PAT }}
+      image: ghcr.io/ 
+    strategy:
+      matrix:
+        folder: []
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v1
+        with:
+          registry: ghcr.io
+          username: ${{ secrets.READ_WRITE_GITHUB_PACKAGES_USER }}
+          password: ${{ secrets.READ_WRITE_GITHUB_PACKAGES_PAT }}
+      - name: Get Maven artifact version
+        id: get_version
+        run: |
+          VERSION=$(xmllint --xpath "//*[local-name()='project']/*[local-name()='version']/text()" pom.xml)
+          echo "Artifact version: $VERSION"
+          echo "::set-output name=VERSION::$VERSION"
+      - name: Use the Version
+        run: |
+          echo "The artifact version is ${{ steps.get_version.outputs.VERSION }}"
+      - name: Download  artifacts
+        run: |
+          mvn --settings ../settings.xml -B -f docker-build-pom.xml  dependency:copy-dependencies \
+          -DoutputDirectory=$(pwd)/target/ \
+          -Dartifact.groupId=com.rockwell.cds \
+          -Dartifact.artifactId=${{ matrix.folder }} \
+          -Dartifact.version=${{ steps.get_version.outputs.VERSION }}
+      - name: Docker build and push
+        run: |
+          docker build -t $DOCKER_REGISTRY_PREFIX/${{ matrix.folder }}:$DOCKER_TAG .
+          echo 'Publish to Github';
+          docker push $DOCKER_REGISTRY_PREFIX/${{ matrix.folder }}:$DOCKER_TAG
+
+  sonar-scan:
+    needs: maven-build-deploy
+    runs-on:
+      - internal
+    container:
+      credentials:
+          username: ${{ secrets.READ_WRITE_GITHUB_PACKAGES_USER }}
+          password: ${{ secrets.READ_WRITE_GITHUB_PACKAGES_PAT }}
+      image: ghcr.io/
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+      - name: Cache Maven packages
+        uses: actions/cache@v2
+        with:
+          path: .m2
+          key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
+          restore-keys: ${{ runner.os }}-m2
+      - name: sonar-scan
+        run: |
+          mvn $MAVEN_CLI_OPTS verify sonar:sonar -Dsonar.projectKey=cds-sql-facade-service -Dsonar.host.url=https://sonarqube.mke.cvbis.devops.rockwell.com -Dsonar.login=b1cf4218b46be533fb78f3bd1f05fd161f70a58c -Dsonar.projectName=cds-sql-facade-service
+
+  staticcodeanalysis:
+    if: github.ref == 'refs/heads/main'
+    needs: maven-build-deploy
+    runs-on:
+      - internal
+    container:
+      credentials:
+          username: ${{ secrets.READ_WRITE_GITHUB_PACKAGES_USER }}
+          password: ${{ secrets.READ_WRITE_GITHUB_PACKAGES_PAT }}
+      image: ghcr.io/
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+      - name: Cache Maven packages
+        uses: actions/cache@v2
+        with:
+          path: .m2
+          key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
+          restore-keys: ${{ runner.os }}-m2
+      - name: staticcodeanalysis
+        run: |
+          mvn $MAVEN_CLI_OPTS site
+          mvn $MAVEN_CLI_OPTS verify pmd:pmd
+          mvn $MAVEN_CLI_OPTS verify checkstyle:checkstyle
+          mvn $MAVEN_CLI_OPTS versions:display-dependency-updates
+          mvn $MAVEN_CLI_OPTS versions:display-plugin-updates
+          mvn $MAVEN_CLI_OPTS versions:dependency-updates-report
+          mvn $MAVEN_CLI_OPTS versions:plugin-updates-report
+
+  deploy-to-cds-qa:
+    needs: Docker-build
+    runs-on: internal
+    steps:
+      - name: Trigger Deployment to CDS QA
+        uses: convictional/trigger-workflow-and-wait@v1.6.1
+        with:
+          owner: ""
+          repo: cds-deployer
+          ref: main
+          workflow_file_name: ${{ env.REPO_WORKFLOW_FILE }}
+          github_token: ${{ secrets.READ_GITHUB_ACTIONS_PAT }}
+          client_payload: |
+            {
+              "kube_namespace": "",
+              "context_group": "",
+              "cds-datameshing-service": "true"
+            }
+
+  functional_testing:
+    needs: deploy-to-cds-qa
+    runs-on: internal
+    steps:
+      - name: Trigger Functional Testing
+        uses: convictional/trigger-workflow-and-wait@v1.6.1
+        with:
+          owner: ""
+          repo: cds-api_automation_testing
+          ref: main
+          workflow_file_name: SmokeRegressionCombined.yml
+          github_token: ${{ secrets.READ_GITHUB_ACTIONS_PAT }}
+          client_payload: |
+            {
+              "DeploymentType": "CDSFoundationAlongWithOtherServices",
+              "DataMeshing": "TRUE"
+            }
+            
+  blackduck-scan:
+     needs: deploy-to-cds-qa
+     runs-on: internal
+     steps:
+      - name: Trigger Functional Testing
+        uses: convictional/trigger-workflow-and-wait@v1.6.1
+        with:
+          owner: ""
+          repo: cds-blackduck-scan
+          ref: main
+          workflow_file_name: blackduck-scan.yml
+          github_token: ${{ secrets.READ_GITHUB_ACTIONS_PAT }}
