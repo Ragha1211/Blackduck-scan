@@ -1,2 +1,2 @@
-export PATH=$PATH:/Users/rpundhir/go/bin/
+export PATH=$PATH:/Users/rchakilam/go/bin/
 CompileDaemon --command="./order"
