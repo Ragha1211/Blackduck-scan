@@ -81,7 +81,7 @@ jobs:
         run: |
           mvn --settings ../settings.xml -B -f docker-build-pom.xml  dependency:copy-dependencies \
           -DoutputDirectory=$(pwd)/target/ \
-          -Dartifact.groupId=com.rockwell.cds \
+          -Dartifact.groupId=com.cds \
           -Dartifact.artifactId=${{ matrix.folder }} \
           -Dartifact.version=${{ steps.get_version.outputs.VERSION }}
       - name: Docker build and push
