@@ -110,7 +110,7 @@ jobs:
           restore-keys: ${{ runner.os }}-m2
       - name: sonar-scan
         run: |
-          mvn $MAVEN_CLI_OPTS verify sonar:sonar -Dsonar.projectKey=cds-sql-facade-service -Dsonar.host.url=https://sonarqube.mke.cvbis.devops.rockwell.com -Dsonar.login=b1cf4218b46be533fb78f3bd1f05fd161f70a58c -Dsonar.projectName=cds-sql-facade-service
+          mvn $MAVEN_CLI_OPTS verify sonar:sonar -Dsonar.projectKey=cds-sql-facade-service -Dsonar.host.url=https://sonarqube.mke..com -Dsonar.login=token -Dsonar.projectName=cds-sql-facade-service
 
   staticcodeanalysis:
     if: github.ref == 'refs/heads/main'
